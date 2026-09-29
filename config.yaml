@@ -1,0 +1,286 @@
+# ============================================================================
+# ML Pipeline Configuration
+#
+# This is the ONLY file a data scientist needs to edit to run the generic
+# notebook for a new use case. No notebook code changes, no SQL required.
+#
+# To start a new use case: copy this file (e.g. config_my_use_case.yaml),
+# change the values below, and point the notebook's load_config(...) call
+# at the new file.
+#
+# The values filled in here are a working example (the original complaint
+# propensity model) so this file runs as-is.
+#
+# model.task_type selects what the pipeline builds: binary, multiclass or
+# regression. This example is binary.
+# ============================================================================
+
+use_case:
+  name: "COMPLAINT_PROPENSITY"     # short unique id -> used in model/table names
+  prefix: "CMU"                    # prefix applied to every generated object
+  description: "Predicts which inforce policies are likely to generate a complaint"
+  owner: "eirfanie@deloitte.com"
+
+# ----------------------------------------------------------------------------
+# Where this runs. Inside a Snowflake Notebook / Workspace, `database`,
+# `schema`, `warehouse` are all that's needed — the active session is reused
+# automatically. `external_connection` only matters if you run this notebook
+# OUTSIDE Snowflake (local Jupyter, an orchestrator, CI/CD).
+# ----------------------------------------------------------------------------
+snowflake:
+  database: "AMFS_DEV_DB"
+  schema: "SBX_DS"
+  warehouse: "AMFS_GEN_WH"
+  role: null                        # null = use the session/service default role
+  external_connection:
+    enabled: false                  # set true only for out-of-Snowflake execution
+    account: null                   # e.g. "myorg-myaccount"
+    secret_name: "SBX_DS.SNOWFLAKE_SERVICE_ACCOUNT"   # see setup_secrets.sql
+
+data:
+  source_view: "CMU_TRAIN_CLEAN"      # table/view in database.schema above
+  target_column: "COMPLAINT_FLAG"     # binary: 0/1 flag. (multiclass: class labels; regression: a numeric value)
+  timestamp_column: "COHORT"          # used for the temporal split
+  key_columns: ["POLICY_NO", "OWN_MDM_ID"]
+
+  # Optional: only set this if source_view actually lives outside Snowflake
+  # and needs to be pulled via an external connector. Most use cases leave
+  # this null because the data is already a Snowflake table/view.
+  external_source_secret: null        # e.g. "SBX_DS.SOURCE_DB_CREDENTIALS"
+
+  # Use [] (not a blank value) when a list is intentionally empty.
+  categorical_columns:
+    - POL_PAYMENT_MODE
+    - OWN_MARITAL_STATUS
+    - CUST_SEGMENT
+    - OWN_GENDER
+
+  numeric_columns:
+    - TRAN_FUN_AMOUNT1
+    - PERCENTAGE_PREMI_INCOME
+    - PERCENTAGE_PREMI_INCOME_BAND
+    - POL_TOTAL_RIDER
+    - BNF_AGE_MAX
+    - CASE_REQ_CASE_CNT
+    - GAIN_VAL_FLAG
+    - BNF_CHILDREN_CNT
+    - BIN_FUN_PRICE1
+    - TRAN_PREMIUM
+    - OCCUPATION_ENCODED
+    - BNF_TOTAL_CNT
+    - LOSS_GAIN_PROTECTION
+    - AG_ORPHAN_FLAG
+    - ANN_TOPUP_BIN
+    - INCOME_BIN
+    - BNF_PARENTS_CNT
+    - ORPHAN_FLAG
+    - CASE_TOTAL_CASES_CNT
+    - OWN_AGE
+    - CASE_INQ_CASE_CNT
+    - AG_SVC_FA_LOS
+    - CUST_VALUE_ENCODED
+    - BNF_GENDER_FEMALE_CNT
+    - CALL_WECALL_ACT_COUNT
+    - GAIN_INVESTMENT_FLAG
+    - TOTAL_OWNED_POLICY
+    - PERCENTAGE_ANN_TOPUP_INCOME_BAND
+    - POL_SUM_INSURED_IDR
+    - OWN_ANNUAL_INCOME
+    - CUST_IN_GAIN_FLAG
+    - BNF_AGE_AVG
+    - CALL_ACTIVITY_TOTAL_CNT
+    - PERCENTAGE_ANN_TOPUP_INCOME
+    - TRAN_FUN_PRICE1
+    - AG_PROD_FA_LOS
+    - RP_ENC_FUN2
+    - RP_ENC_FUN1
+    - RP_ENC_FUN3
+    - CUST_IN_GAIN_VAL
+    - ANN_TOP_UP_PREM_IDR
+    - CALL_WECALL_ACT_MONTH_SINCE_FIRST
+    - ECONOMIC_DEVELOPMENT_LEVEL_ENCODED
+    - LOSS_GAIN_INVESTMENT
+    - LATEST_CLH_SUBMIT_SINCE
+
+  # Columns imputed with the median instead of the mean when missing.
+  median_impute_columns:
+    - TRAN_FUN_AMOUNT1
+    - BNF_AGE_MAX
+    - AG_SVC_FA_LOS
+    - CUST_VALUE_ENCODED
+    - ECONOMIC_DEVELOPMENT_LEVEL_ENCODED
+
+split:
+  strategy: "temporal"               # temporal | random  (auto-falls back to random)
+  test_fraction: 0.20
+  hpo_validation_fraction: 0.20
+  random_seed: 42
+
+model:
+  algorithm: "xgboost"               # xgboost | lightgbm | random_forest | logistic_regression
+  task_type: "binary"                # binary | multiclass | regression  (left out = binary)
+  optimization_metric: "pr_auc"      # must match task_type:
+                                     #   binary     -> pr_auc | roc_auc | f1
+                                     #   multiclass -> f1 (macro-averaged)
+                                     #   regression -> rmse | mae | r2
+  n_hpo_trials: 25
+  early_stopping_rounds: 50          # only used by xgboost / lightgbm
+
+  # search_space and fixed_params are keyed by algorithm; only the entry for
+  # model.algorithm is used.
+  search_space:
+    xgboost:
+      max_depth: [2, 3, 4, 5]
+      min_child_weight: [10, 25, 50, 100, 200]
+      subsample: [0.6, 0.7, 0.8, 0.9, 1.0]
+      colsample_bytree: [0.5, 0.6, 0.7, 0.8, 1.0]
+      learning_rate: [0.02, 0.03, 0.05, 0.08, 0.10]
+      reg_lambda: [1.0, 3.0, 10.0, 30.0]
+      reg_alpha: [0.0, 0.1, 1.0]
+      use_scale_pos_weight: true     # class-imbalance weighting: binary only, ignored otherwise
+    lightgbm:
+      num_leaves: [15, 31, 63, 127]
+      min_child_samples: [10, 25, 50, 100]
+      subsample: [0.6, 0.7, 0.8, 0.9, 1.0]
+      colsample_bytree: [0.5, 0.6, 0.7, 0.8, 1.0]
+      learning_rate: [0.02, 0.03, 0.05, 0.08, 0.10]
+      reg_lambda: [0.0, 1.0, 3.0, 10.0]
+      reg_alpha: [0.0, 0.1, 1.0]
+      use_scale_pos_weight: true
+    random_forest:
+      n_estimators: [200, 400, 600, 800]
+      max_depth: [4, 6, 8, 10]
+      min_samples_leaf: [5, 10, 25, 50]
+      max_features: ["sqrt", "log2", 0.5]
+    logistic_regression:
+      C: [0.01, 0.03, 0.1, 0.3, 1.0, 3.0]
+      penalty: ["l2"]
+
+  fixed_params:
+    xgboost:
+      n_estimators: 2000
+      tree_method: "hist"
+    lightgbm:
+      n_estimators: 2000
+    random_forest: {}
+    logistic_regression:
+      max_iter: 2000
+      class_weight: "balanced"
+
+scoring:
+  # Risk bands apply to binary and multiclass (multiclass ranks by prediction
+  # confidence). For regression set the three *_n values to null.
+  daily_capacity: 500
+  risk_band_high_n: 500              # top N test-set rows -> HIGH
+  risk_band_medium_n: 2500           # top N test-set rows -> MEDIUM
+  label_horizon_days: 90
+
+explainability:
+  enabled: true
+  top_n_features: 15
+  top_n_causes_per_row: 3
+
+feature_store:
+  enabled: true
+  timestamp_column: "COHORT_DT"      # column used for feature view time-travel
+
+output:
+  # Leave any of these null to auto-derive from use_case.prefix / name.
+  model_name: "COMPLAINT_PROPENSITY_MODEL_V3"   # set explicitly to match the existing registered model
+  model_version: "XGB_R1_GENERIC"                    # first version registered by the TRAINING notebook
+  feature_store_name: null           # -> "{PREFIX}_FEATURE_STORE"
+  entity_name: null                  # -> "{PREFIX}_ENTITY"
+  entity_join_keys: ["POLICY_NO"]
+  feature_view_name: null            # -> "{PREFIX}_FEATURES"
+  baseline_table: null               # -> "{PREFIX}_MONITOR_BASELINE"
+  monitor_table: null                # -> "{PREFIX}_PREDICT_MONITOR"
+  # Shared across ALL use cases — do not prefix these.
+  contract_table: "FEATURE_CONTRACT_REGISTRY"
+  config_table: "ML_CONFIG_REGISTRY"
+  log_table: "ML_SCORING_LOG"
+  watermark_table: "ML_SCORING_WATERMARK"
+
+# ----------------------------------------------------------------------------
+# Only read by generic_ml_retraining_pipeline.ipynb. Challenges the current
+# champion with fresh data that now has real outcomes, and promotes the
+# challenger only if it wins.
+#
+# Nothing here needs use-case SQL except the ground-truth SOURCE (a table or
+# view saying what really happened). Merging outcomes into the monitor table
+# and building the retraining dataset are generic and driven by these keys.
+# ----------------------------------------------------------------------------
+retraining:
+  enabled: true
+  previous_version: null              # null = latest version logged for this use case (the champion)
+  new_version: null                   # null = champion's R-number plus one (XGB_R1_GENERIC -> XGB_R2_GENERIC)
+  rerun_hpo: false                    # false = reuse champion's best_params; true = fresh HPO search on the retrain data
+
+  # How the comparison set is chosen. It is the newest share of production rows the champion
+  # scored that now have a real outcome. Everything older, plus the original training data,
+  # trains the challenger, so the challenger really does learn from new data.
+  holdout_fraction: 0.5
+  min_holdout_rows: 1000              # too few labeled rows -> the run is SKIPPED, not decided
+  min_holdout_positives: 20           # binary only: a rare-event comparison needs enough positives
+
+  # Ground truth: where true outcomes come from.
+  ground_truth_source: "CMU_GROUND_TRUTH"        # table/view: one row per key plus the outcome
+  ground_truth_label_column: "COMPLAIN_FLAG"     # outcome column inside that source
+  ground_truth_key_column: null                  # null = data.key_columns[0]
+  ground_truth_ts_column: null                   # optional: if the source can hold several rows per key, latest wins
+  ground_truth_source_sql_file: "ground_truth_source.sql"   # optional use-case SQL that creates the source
+  ground_truth_procedure_name: null   # scheduled back-fill procedure. null -> "{PREFIX}_SP_GROUND_TRUTH"
+  respect_label_maturity: false       # true in production: only label rows whose LABEL_MATURE_AT has passed
+  synthetic_labels: true              # sandbox simulated outcomes: warned loudly and tagged on the run
+
+  # The retraining dataset (a generic view: original training data plus labeled production rows).
+  retrain_base_view: "CMU_RETRAIN_BASE"
+  production_source: null             # null = inference.source_stream_view
+  production_timestamp_sql: "TO_NUMBER(TO_CHAR({m}.SCORED_AT, 'YYYYMM'))"   # value of data.timestamp_column for production rows
+  retrain_base_sql_file: null         # optional escape hatch: your own SQL instead of the generic view
+
+  # The two keys below are named after the binary metrics they were written
+  # for, and act as the primary gate / guardrail for every task type.
+  promotion:
+    min_recall_at_decile_lift_pct: 5.0   # challenger must beat champion recall@decile by more than this %
+    max_pr_auc_drop_pct: 10.0            # allow challenger PR-AUC to be at most this % worse
+
+# Used by both notebooks. The training notebook creates a monitor for the
+# first version; the retraining notebook creates one for each promoted
+# challenger. Requires CREATE MODEL MONITOR on the schema (setup_secrets.sql).
+model_monitor:
+  enabled: true
+  refresh_interval: "1 minute"
+  aggregation_window: "1 day"
+
+# ----------------------------------------------------------------------------
+# Only read by generic_ml_inference_deploy_pipeline.ipynb. Deploys a scoring
+# input view + a stored procedure for `deploy_version` (or output.model_version
+# if null). The procedure is meant to be triggered by an external
+# orchestrator (Airflow) via a plain SQL CALL — see airflow_trigger.sql for
+# the exact statement and the grant it needs.
+#
+# The procedure only scores rows whose watermark_column value is earlier than
+# today's midnight, and it starts from the beginning of time on its first run.
+# ----------------------------------------------------------------------------
+inference:
+  enabled: true
+  deploy_version: null                 # null -> output.model_version; set explicitly to deploy a specific version
+  input_view: null                     # -> "{PREFIX}_SCORE_INPUT"
+  procedure_name: null                 # -> "{PREFIX}_SP_SCORE_DAILY"
+  source_stream_view: "CMU_PROD_CLEAN" # raw incoming feed the procedure scores from each run
+  watermark_column: "RECORD_TS"        # column on source_stream_view used to find new rows
+  xai_bucket_count: 20                 # rows are batched into this many partitions for EXPLAIN
+  passthrough_columns:                 # carried through the input view untouched (not encoded)
+    - POLICY_NO                        # must not overlap any feature column
+    - OWN_MDM_ID
+    - OWN_NAME
+    - OWN_OCCUPATION
+    - BATCH_NO
+    - RECORD_TS
+  # Optional use-case business/consumption table, upserted each run in the
+  # same transaction as the monitor table. Set business_table: null to skip
+  # it entirely. Keys included here are used as-is; the first entry is the
+  # MERGE key. Renaming (e.g. OWN_NAME -> OWN_NAME_LAST) happens here, not
+  # in passthrough_columns, which must match the source column names exactly.
+  business_table: null
+  business_table_column_map: []
